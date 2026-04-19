@@ -1,9 +1,5 @@
 'use strict';
 
-/* ── Supabase Client ─────────────────────────────────── */
-const { createClient } = window.supabase;
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
 /* ── State ───────────────────────────────────────────── */
 let currentUser = null, profile = null;
 let currentFilter = 'all', editingTaskId = null;
@@ -67,13 +63,15 @@ async function handleSignup(e) {
   const email    = document.getElementById('signup-email').value.trim().toLowerCase();
   const password = document.getElementById('signup-password').value;
   setLoading('signup-btn', true);
-  const { data, error } = await sb.auth.signUp({ email, password });
-  if (error) { showErr('signup-error', error.message); setLoading('signup-btn', false); return; }
-  if (data.user) {
-    await sb.from('profiles').insert({ id: data.user.id, name, phone, prefs: DEFAULT_PREFS });
+  try {
+    const userCredential = await auth.createUserWithEmailAndPassword(email, password);
+    await db.ref('profiles/' + userCredential.user.uid).set({ name, phone, prefs: DEFAULT_PREFS });
+    setLoading('signup-btn', false);
+    toast('Account created successfully!');
+  } catch (error) {
+    showErr('signup-error', error.message);
+    setLoading('signup-btn', false);
   }
-  setLoading('signup-btn', false);
-  if (!data.session) toast('Check your email to confirm your account.');
 }
 
 async function handleLogin(e) {
@@ -81,20 +79,23 @@ async function handleLogin(e) {
   const email    = document.getElementById('login-email').value.trim().toLowerCase();
   const password = document.getElementById('login-password').value;
   setLoading('login-btn', true);
-  const { error } = await sb.auth.signInWithPassword({ email, password });
-  if (error) { showErr('login-error', error.message); }
+  try {
+    await auth.signInWithEmailAndPassword(email, password);
+  } catch (error) {
+    showErr('login-error', error.message);
+  }
   setLoading('login-btn', false);
 }
 
 async function handleLogout() {
   if (schedulerInterval) clearInterval(schedulerInterval);
-  await sb.auth.signOut();
+  await auth.signOut();
 }
 
 /* ── Profile ─────────────────────────────────────────── */
 async function loadProfile() {
-  const { data } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
-  profile = data || { name: currentUser.email, prefs: DEFAULT_PREFS };
+  const snapshot = await db.ref('profiles/' + currentUser.uid).once('value');
+  profile = snapshot.val() || { name: currentUser.email, prefs: DEFAULT_PREFS };
 }
 
 function populateSettings() {
@@ -115,34 +116,41 @@ async function saveSettings() {
   ['sms','email','push','morning','afternoon','evening'].forEach(k => {
     prefs[k] = document.getElementById('pref-' + k)?.checked || false;
   });
-  const { error } = await sb.from('profiles').upsert({ id: currentUser.id, name, phone, prefs });
-  if (error) { toast('Failed to save settings.', 'error'); return; }
-  profile = { ...profile, name, phone, prefs };
-  updateSidebarUser(); toast('Settings saved.');
+  try {
+    await db.ref('profiles/' + currentUser.uid).update({ name, phone, prefs });
+    profile = { ...profile, name, phone, prefs };
+    updateSidebarUser(); toast('Settings saved.');
+  } catch (error) {
+    toast('Failed to save settings.', 'error');
+  }
 }
 
 async function confirmDeleteAccount() {
   if (!confirm('This will permanently delete your account and all data. Continue?')) return;
-  await sb.from('tasks').delete().eq('user_id', currentUser.id);
-  await sb.from('notifications').delete().eq('user_id', currentUser.id);
-  await sb.from('streaks').delete().eq('user_id', currentUser.id);
-  await sb.from('profiles').delete().eq('id', currentUser.id);
-  await sb.auth.signOut();
+  await db.ref('tasks/' + currentUser.uid).remove();
+  await db.ref('notifications/' + currentUser.uid).remove();
+  await db.ref('streaks/' + currentUser.uid).remove();
+  await db.ref('profiles/' + currentUser.uid).remove();
+  await currentUser.delete();
+  await auth.signOut();
 }
 
 /* ── Tasks ───────────────────────────────────────────── */
 async function getMyTasks(refresh = false) {
   if (tasksCache && !refresh) return tasksCache;
-  const { data } = await sb.from('tasks').select('*')
-    .eq('user_id', currentUser.id).order('due', { ascending: true });
-  tasksCache = data || [];
+  const snapshot = await db.ref('tasks/' + currentUser.uid).orderByChild('due').once('value');
+  const tasks = [];
+  snapshot.forEach(child => {
+    tasks.push({ id: child.key, ...child.val() });
+  });
+  tasksCache = tasks;
   return tasksCache;
 }
 
 async function handleAddReminder(e) {
   e.preventDefault();
   const task = {
-    user_id:            currentUser.id,
+    user_id:            currentUser.uid,
     name:               document.getElementById('task-name').value.trim(),
     type:               document.getElementById('task-type').value,
     subject:            document.getElementById('task-subject').value.trim(),
@@ -155,20 +163,24 @@ async function handleAddReminder(e) {
     reminder_evening:   document.getElementById('reminder-evening').checked,
     completed:          false,
   };
-  const { error } = await sb.from('tasks').insert(task);
-  if (error) { toast('Failed to save reminder.', 'error'); return; }
-  tasksCache = null;
-  await addNotification(`Reminder added: "${task.name}" — due ${fmtDate(task.due)}`);
-  toast('Reminder saved.');
-  document.getElementById('add-reminder-form').reset();
-  document.getElementById('task-color').value = '#6366f1';
-  showView('reminders');
+  try {
+    const newTaskRef = db.ref('tasks/' + currentUser.uid).push();
+    await newTaskRef.set(task);
+    tasksCache = null;
+    await addNotification(`Reminder added: "${task.name}" — due ${fmtDate(task.due)}`);
+    toast('Reminder saved.');
+    document.getElementById('add-reminder-form').reset();
+    document.getElementById('task-color').value = '#6366f1';
+    showView('reminders');
+  } catch (error) {
+    toast('Failed to save reminder.', 'error');
+  }
 }
 
 async function toggleComplete(id) {
   const tasks = await getMyTasks();
   const t = tasks.find(t => t.id === id); if (!t) return;
-  await sb.from('tasks').update({ completed: !t.completed }).eq('id', id);
+  await db.ref('tasks/' + currentUser.uid + '/' + id).update({ completed: !t.completed });
   tasksCache = null;
   if (!t.completed) updateStreak();
   renderOverview(); renderAllTasks();
@@ -201,13 +213,13 @@ async function handleEditSave(e) {
     priority: document.getElementById('edit-task-priority').value,
     notes:    document.getElementById('edit-task-notes').value.trim(),
   };
-  await sb.from('tasks').update(updates).eq('id', editingTaskId);
+  await db.ref('tasks/' + currentUser.uid + '/' + editingTaskId).update(updates);
   tasksCache = null; closeEditModal(); toast('Changes saved.');
   renderAllTasks(); renderOverview();
 }
 async function confirmDeleteTask(id) {
   if (!confirm('Delete this reminder?')) return;
-  await sb.from('tasks').delete().eq('id', id);
+  await db.ref('tasks/' + currentUser.uid + '/' + id).remove();
   tasksCache = null; toast('Reminder deleted.', 'error');
   renderAllTasks(); renderOverview();
 }
@@ -268,12 +280,12 @@ function setFilter(type, el) {
 
 /* ── Notifications ───────────────────────────────────── */
 async function addNotification(msg) {
-  await sb.from('notifications').insert({ user_id: currentUser.id, message: msg });
+  await db.ref('notifications/' + currentUser.uid).push({ message: msg, created_at: new Date().toISOString() });
   updateNotifBadge();
 }
 async function updateNotifBadge() {
-  const { count } = await sb.from('notifications')
-    .select('*', { count: 'exact', head: true }).eq('user_id', currentUser.id);
+  const snap = await db.ref('notifications/' + currentUser.uid).once('value');
+  const count = snap.numChildren();
   const badge = document.getElementById('notif-badge'); if (!badge) return;
   badge.textContent = count || 0;
   badge.classList.toggle('hidden', !count);
@@ -287,15 +299,16 @@ async function toggleNotifPanel() {
   if (open) renderNotifications();
 }
 async function renderNotifications() {
-  const { data } = await sb.from('notifications').select('*')
-    .eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30);
-  document.getElementById('notif-list').innerHTML = data?.length
+  const snap = await db.ref('notifications/' + currentUser.uid).orderByChild('created_at').limitToLast(30).once('value');
+  const data = [];
+  snap.forEach(child => { data.unshift(child.val()); });
+  document.getElementById('notif-list').innerHTML = data.length
     ? data.map(n => `<div class="notif-item"><div>${n.message}</div>
         <div class="notif-time">${new Date(n.created_at).toLocaleString()}</div></div>`).join('')
     : `<div style="padding:1rem;color:var(--muted);font-size:.85rem;text-align:center">No notifications</div>`;
 }
 async function clearNotifications() {
-  await sb.from('notifications').delete().eq('user_id', currentUser.id);
+  await db.ref('notifications/' + currentUser.uid).remove();
   updateNotifBadge(); renderNotifications();
 }
 
@@ -312,14 +325,16 @@ function calcStreak(days) {
 }
 async function updateStreak() {
   const today = new Date().toISOString().slice(0, 10);
-  const { data } = await sb.from('streaks').select('*').eq('user_id', currentUser.id).single();
+  const snap = await db.ref('streaks/' + currentUser.uid).once('value');
+  const data = snap.val();
   const days = data?.days || [];
   if (days.includes(today)) return;
   days.push(today);
-  await sb.from('streaks').upsert({ user_id: currentUser.id, days, count: calcStreak(days) });
+  await db.ref('streaks/' + currentUser.uid).set({ days, count: calcStreak(days) });
 }
 async function renderStreak() {
-  const { data } = await sb.from('streaks').select('*').eq('user_id', currentUser.id).single();
+  const snap = await db.ref('streaks/' + currentUser.uid).once('value');
+  const data = snap.val();
   const days = data?.days || [];
   document.getElementById('streak-count').textContent = data?.count || 0;
   const grid = []; const today = new Date();
@@ -354,7 +369,7 @@ async function checkReminders() {
   if (h === SLOTS.afternoon && profile.prefs?.afternoon) slot = 'afternoon';
   if (h === SLOTS.evening   && profile.prefs?.evening)   slot = 'evening';
   if (!slot) return;
-  const key = `sp_sent_${currentUser.id}_${todayKey}_${slot}`;
+  const key = `sp_sent_${currentUser.uid}_${todayKey}_${slot}`;
   if (localStorage.getItem(key)) return;
   const tasks = await getMyTasks();
   const due = tasks.filter(t => !t.completed && daysUntil(t.due) >= 0 && daysUntil(t.due) <= 3);
@@ -401,9 +416,9 @@ function toggleSidebar() { document.getElementById('sidebar').classList.toggle('
 function closeSidebar()  { document.getElementById('sidebar').classList.remove('open'); }
 
 /* ── Session Listener ────────────────────────────────── */
-sb.auth.onAuthStateChange(async (event, session) => {
-  if (session) {
-    currentUser = session.user;
+auth.onAuthStateChanged(async (user) => {
+  if (user) {
+    currentUser = user;
     tasksCache  = null;
     await loadProfile();
     showDashboard();

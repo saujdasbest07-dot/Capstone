@@ -1,3 +1,16 @@
-// ── Supabase Credentials ──────────────────────────────────
-const SUPABASE_URL      = 'https://cdhqzwraveasdfxphbef.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaHF6d3JhdmVhc2RmeHBoYmVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1NjY3NTYsImV4cCI6MjA5MjE0Mjc1Nn0.uOlrjEm9dzwfuiANnw7zpevfS-oZT4CN9vTnHnVagpQ';
+// ── Firebase Configuration ──────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyB32zfiUjjVW2e1r_NQ2uHnMo3vpmIiPJI",
+  authDomain: "capstone-67404.firebaseapp.com",
+  databaseURL: "https://capstone-67404-default-rtdb.firebaseio.com",
+  projectId: "capstone-67404",
+  storageBucket: "capstone-67404.firebasestorage.app",
+  messagingSenderId: "652399277007",
+  appId: "1:652399277007:web:6008926199a95cf9cf18ba",
+  measurementId: "G-CCTZP1XGF2"
+};
+
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+const auth = firebase.auth();
